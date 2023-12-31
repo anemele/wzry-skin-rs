@@ -4,8 +4,8 @@ use futures::{stream, StreamExt};
 use regex::Regex;
 use reqwest::{Client, Result};
 use scraper::{Html, Selector};
+use std::fs;
 use std::path::Path;
-use std::{fs, io::Write};
 
 mod api;
 use api::*;
@@ -110,6 +110,7 @@ async fn get_heropage<'a>(client: &Client, css: &Selector, hero: &Hero<'a>) -> R
 
 async fn get_skinimag(client: &Client, url: &str, save_path: &Path) -> Result<()> {
     let response = client.get(url).send().await?.bytes().await?;
-    let _ = fs::File::create(save_path).unwrap().write(&response);
+    let _ = tokio::fs::write(save_path, &response).await;
+
     Ok(())
 }
