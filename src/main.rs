@@ -4,20 +4,14 @@ use futures::{stream, StreamExt};
 use regex::Regex;
 use reqwest::{Client, Result};
 use scraper::{Html, Selector};
-use serde::{Deserialize, Serialize};
-use serde_json;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::{fs, io::Write};
 
 mod api;
 use api::*;
 
-#[derive(Debug, Serialize, Deserialize)]
-struct Hero<'a> {
-    pub ename: i32,
-    pub cname: &'a str,
-    pub title: &'a str,
-}
+mod types;
+use types::*;
 
 const SAVE_ROOT: &str = "image";
 const CONCURRENT_REQUESTS: usize = 8;
@@ -26,13 +20,15 @@ const CONCURRENT_REQUESTS: usize = 8;
 async fn main() -> Result<()> {
     let client = reqwest::Client::new();
 
-    let body = client.get(API_HEROLIST).send().await?.text().await?;
+    // Step 1, get the herolist from API
+    let body = client.get(API_HEROLIST).send().await?.bytes().await?;
 
-    let hero_list: Vec<Hero> = match serde_json::from_str(&body) {
-        Ok(hero) => hero,
+    let hero_list: Vec<Hero> = match serde_json::from_slice(&body) {
+        Ok(list) => list,
         Err(e) => panic!("{}", e),
     };
 
+    // Step 2, set the constants: savepath, selector, regex, ...
     let root = Path::new(SAVE_ROOT);
     if !root.exists() {
         let _ = fs::create_dir(root);
@@ -41,53 +37,51 @@ async fn main() -> Result<()> {
     let css = Selector::parse("div.pic-pf>ul").unwrap();
     let re = Regex::new(r"(\S+?)[\s(?:&\d+)\|]+").unwrap();
 
+    // Step 3
     let skins_list = stream::iter(hero_list)
         .map(|hero| {
+            let hero_path = root.join(format!("{}_{}", hero.cname, hero.title));
+            if !hero_path.exists() {
+                let _ = fs::create_dir(&hero_path);
+            }
             let client = &client;
             let css = &css;
-            let re = &re;
             async move {
-                let hero_path = root.join(format!("{}_{}", hero.cname, hero.title));
-                if !hero_path.exists() {
-                    let _ = fs::create_dir(&hero_path);
-                }
-
-                let mut url_list = Vec::<(PathBuf, String)>::new();
-                if let Ok(skins) = get_heropage(&client, &css, &hero).await {
-                    for (i, cap) in re.captures_iter(skins.as_str()).enumerate() {
-                        // println!("{cap:?}")
-                        // println!("{}", cap[1].trim())
-                        // println!("{i}");
-                        let skin = cap[1].trim();
-                        // println!("{skin}")
-
-                        let skin_file_name = format!("{}_{}.jpg", i + 1, skin);
-                        let save_path = hero_path.join(&skin_file_name);
-                        let skin_url = api_skin_url(hero.ename, i as i32 + 1);
-                        url_list.push((save_path, skin_url))
-                    }
-                }
-
-                url_list
+                (
+                    hero_path,
+                    hero.ename,
+                    match get_heropage(&client, &css, &hero).await {
+                        Ok(skins) => skins,
+                        Err(_) => "".to_string(),
+                    },
+                )
             }
         })
         .buffer_unordered(CONCURRENT_REQUESTS);
 
+    // Step 4
     skins_list
-        .for_each(|list| async {
-            for (path, url) in list {
-                if path.exists() {
-                    continue;
-                }
-                let client = &client;
+        .for_each(|(hero_path, hero_id, skins)| {
+            let client = &client;
+            let re = &re;
 
-                (async {
-                    match get_skinimag(&client, &url, &path).await {
-                        Ok(_) => println!("done: {}", path.display()),
-                        Err(e) => eprintln!("{}", e),
+            async move {
+                for (i, cap) in re.captures_iter(skins.as_str()).enumerate() {
+                    let skin = cap[1].trim();
+                    let name = format!("{}_{}.jpg", i + 1, skin);
+                    let path = hero_path.join(&name);
+                    if path.exists() {
+                        continue;
                     }
-                })
-                .await
+                    let url = api_skin_url(hero_id, i as i32 + 1);
+                    (async {
+                        match get_skinimag(&client, &url, &path).await {
+                            Ok(_) => println!("done: {}", path.display()),
+                            Err(e) => eprintln!("{}", e),
+                        }
+                    })
+                    .await
+                }
             }
         })
         .await;
